@@ -1,0 +1,991 @@
+Design:
+four nodes: 1 controller, 1 cinder, 1 neutron and 1 nova
+
+Network: 
+
+10.33.2.0/24: node administration and external(floating) network for VM
+192.168.0.0/24: AMPQ and API traffic between resource nodes and the controller.
+172.16.0.0/24: VM overlay network 
+
+
+controller |eth0:10.33.2.50|
+		   |eth1:192.168.0.50|
+neutron	   |eth0:10.33.2.51|
+		   |eth1:192.168.0.51|
+		   |eth2:VM traffic interface| 
+cinder	   |eth0:10.33.2.52|
+		   |eth1:192.168.0.52|
+nova	   |eth0:10.33.2.53|
+		   |eth1:192.168.0.53|
+
+
+   
+ovs
+br-int: bridge attached to instances
+br-tun: bridge used for creating tunels between node to accomendate the VM traffic 
+br-ex: bridge used for VM to access external network --> only exist on neutron node. 
+
+
+
+
+
+CONTROLLER Node configuration
+
+install rabbitmq
+root@controller:~# apt install rabbitmq-server -y
+root@controller:~#  rabbitmqctl change_password guest jennings
+root@controller:~#  rabbitmqctl status
+Status of node rabbit@controller ...
+[{pid,1897},
+ {running_applications,[{rabbit,"RabbitMQ","3.2.4"},
+                        {mnesia,"MNESIA  CXC 138 12","4.11"},
+                        {os_mon,"CPO  CXC 138 46","2.2.14"},
+                        {xmerl,"XML parser","1.3.5"},
+                        {sasl,"SASL  CXC 138 11","2.3.4"},
+                        {stdlib,"ERTS  CXC 138 10","1.19.4"},
+                        {kernel,"ERTS  CXC 138 10","2.16.4"}]},
+ {os,{unix,linux}},
+ {erlang_version,"Erlang R16B03 (erts-5.10.4) [source] [64-bit] [async-threads:30] [kernel-poll:true]\n"},
+ {memory,[{total,34658024},
+          {connection_procs,2632},
+          {queue_procs,5264},
+          {plugins,0},
+          {other_proc,13255328},
+          {mnesia,57824},
+          {mgmt_db,0},
+          {msg_index,33584},
+          {other_ets,744968},
+          {binary,7136},
+          {code,16522377},
+          {atom,594537},
+          {other_system,3434374}]},
+ {vm_memory_high_watermark,0.4},
+ {vm_memory_limit,205089996},
+ {disk_free_limit,50000000},
+ {disk_free,16889131008},
+ {file_descriptors,[{total_limit,924},
+                    {total_used,3},
+                    {sockets_limit,829},
+                    {sockets_used,1}]},
+ {processes,[{limit,1048576},{used,122}]},
+ {run_queue,0},
+ {uptime,5303}]
+...done.
+
+Install and configure mysql
+
+root@controller:~# apt install python-mysqldb mysql-server 
+
+change the bind ip address to 0.0.0.0
+root@controller:~# vi /etc/mysql/my.cnf
+bind-address= 0.0.0.0
+
+restart mysql
+root@controller:~# service mysql restart
+
+
+Keystone configuration
+
+mysql>CREATE DATABASE keystone;
+mysql>GRANT ALL ON keystone.* TO 'keystone_dbu'@'localhost' IDENTIFIED BY 'jennings';
+mysql>GRANT ALL ON keystone.* TO 'keystone_dbu'@'%' IDENTIFIED BY 'jennings';
+
+root@controller:~# apt install keystone -y
+
+Modifying /etc/keystone/keystone.conf
+[database]
+
+#connection = sqlite:////var/lib/keystone/keystone.db
+connection = mysql://keystone_dbu:jennings@localhost:3306/keystone
+mysql_sql_mode=TRADITIONAL
+
+
+restart keystone
+root@controller:~# service keystone restart
+
+Initializing the data store
+root@controller:~# keystone-manage db_sync
+root@controller:~# keystone service-create --name=keystone --type=identity --description='Identity Service'
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |         Identity Service         |
+|   enabled   |               True               |
+|      id     | 6e1365b629c54190aab583fe34d8e7b5 |
+|     name    |             keystone             |
+|     type    |             identity             |
++-------------+----------------------------------+
+root@controller:~#  keystone endpoint-create --region RegionOne --service=keystone --publicurl=http://10.33.2.50:5000/v2.0 --internalurl=http://192.168.0.50:5000/v2.0 --adminurl=http://192.168.0.50:35357/v2.0
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminurl  |  http://192.168.0.50:35357/v2.0  |
+|      id     | a8405da44ec04133ab60cd6cbb6c74d9 |
+| internalurl |  http://192.168.0.50:5000/v2.0   |
+|  publicurl  |   http://10.33.2.50:5000/v2.0    |
+|    region   |            RegionOne             |
+|  service_id | 6e1365b629c54190aab583fe34d8e7b5 |
++-------------+----------------------------------+
+
+root@controller:~#  keystone tenant-create --name=admin --description "Admin Tenant"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |           Admin Tenant           |
+|   enabled   |               True               |
+|      id     | 482865a449644957aa8c8a19a98c5130 |
+|     name    |              admin               |
++-------------+----------------------------------+
+root@controller:~# keystone tenant-create --name=service  --description="Service Tenant"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |          Service Tenant          |
+|   enabled   |               True               |
+|      id     | 67d0e28f53c6470a8f8d8cc419b02d87 |
+|     name    |             service              |
++-------------+----------------------------------+
+
+root@controller:~# keystone user-create --name=admin --pass=jennings --email=jenningsloy318@gmail.com
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|  email   |     jenningsloy318@gmail.com     |
+| enabled  |               True               |
+|    id    | b36d2af3922c47589feae6cd82280bf3 |
+|   name   |              admin               |
+| username |              admin               |
++----------+----------------------------------+
+
+root@controller:~# keystone role-create --name=admin
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|    id    | b4f0c248e11b4e7ca642f4f953399bb4 |
+|   name   |              admin               |
++----------+----------------------------------+
+
+root@controller:~# keystone user-role-add --user=admin --role=admin --tenant=admin
+root@controller:~# keystone user-role-list --user=admin --tenant=admin
++----------------------------------+-------+----------------------------------+----------------------------------+
+|                id                |  name |             user_id              |            tenant_id             |
++----------------------------------+-------+----------------------------------+----------------------------------+
+| b4f0c248e11b4e7ca642f4f953399bb4 | admin | b36d2af3922c47589feae6cd82280bf3 | 482865a449644957aa8c8a19a98c5130 |
++----------------------------------+-------+----------------------------------+----------------------------------+
+
+Glance configuration
+mysql> CREATE DATABASE glance;
+Query OK, 1 row affected (0.00 sec)
+
+mysql> GRANT ALL ON glance.* TO 'glance_dbu'@'%' IDENTIFIED BY 'jennings';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> GRANT ALL ON glance.* TO 'glance_dbu'@'localhost' IDENTIFIED BY 'jennings';
+Query OK, 0 rows affected (0.00 sec)
+
+root@controller:~# keystone user-create --name=glance --pass="jennings" --email=jenningsloy318@gmail.com
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|  email   |     jenningsloy318@gmail.com     |
+| enabled  |               True               |
+|    id    | d1d471b97b3847198181ec981c27e247 |
+|   name   |              glance              |
+| username |              glance              |
++----------+----------------------------------+
+
+root@controller:~# keystone user-role-add --user=glance --role-id=admin --tenant=service
+
+root@controller:~# keystone user-role-list --user=glance --tenant=service
++----------------------------------+-------+----------------------------------+----------------------------------+
+|                id                |  name |             user_id              |            tenant_id             |
++----------------------------------+-------+----------------------------------+----------------------------------+
+| b4f0c248e11b4e7ca642f4f953399bb4 | admin | d1d471b97b3847198181ec981c27e247 | 67d0e28f53c6470a8f8d8cc419b02d87 |
++----------------------------------+-------+----------------------------------+----------------------------------+
+
+root@controller:~# keystone service-create --name=glance --type=image --description="Image Service"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |          Image Service           |
+|   enabled   |               True               |
+|      id     | 08ec463160364782ba3646f01eff80d1 |
+|     name    |              glance              |
+|     type    |              image               |
++-------------+----------------------------------+
+
+root@controller:~# keystone endpoint-create  --region RegionOne  --service=glance  --publicurl=http://10.33.2.50:9292  --internalurl=http://192.168.0.50:9292  --adminurl=http://192.168.0.50:9292
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminurl  |     http://192.168.0.50:9292     |
+|      id     | 519c955c46e04fa0833f0031eeb9130f |
+| internalurl |     http://192.168.0.50:9292     |
+|  publicurl  |      http://10.33.2.50:9292      |
+|    region   |            RegionOne             |
+|  service_id | 08ec463160364782ba3646f01eff80d1 |
++-------------+----------------------------------+
+root@controller:~# apt install glance glance-api glance-registry python-glanceclient glance-common -y
+
+
+Modifying /etc/glance/glance-api.conf
+[DEFAULT]
+notifier_strategy = rabbit
+rabbit_host = 192.168.0.50
+rabbit_userid = guest
+rabbit_password = jennings
+
+[database]
+connection = mysql://glance_dbu:jennings@localhost/glance
+
+Modifying /etc/glance/glance-registry.conf
+connection = mysql://glance_dbu:jennings@localhost/glance
+mysql_sql_mode = TRADITIONAL
+
+
+Restarting glance-api and glance-registry
+
+root@controller:~# service glance-api restart
+glance-api stop/waiting
+glance-api start/running, process 8024
+
+root@controller:~# service glance-registry restart
+glance-registry stop/waiting
+glance-registry start/running, process 8079
+
+Initializing the data store
+sudo glance-manage db_sync
+
+if got error  2016-07-15 12:29:33.364 8100 CRITICAL glance [-] ValueError: Tables "migrate_version" have non utf8 collation, please make sure all tables are CHARSET=utf8
+mysql> use glance;
+mysql>alter table migrate_version convert to  character set utf8 collate utf8_unicode_ci;
+
+excute  glance-manage db_sync again
+
+
+root@controller:~# glance --os-username=admin --os-password jennings --os-tenant-name=admin --os-auth-url=http://10.33.2.50:5000/v2.0 image-create --name="Cirros 0.3.4" --is-public=true --disk-format=qcow2 --container-format=bare --file cirros-0.3.4-x86_64-disk.img
++------------------+--------------------------------------+
+| Property         | Value                                |
++------------------+--------------------------------------+
+| checksum         | ee1eca47dc88f4879d8a229cc70a07c6     |
+| container_format | bare                                 |
+| created_at       | 2016-07-15T04:39:57                  |
+| deleted          | False                                |
+| deleted_at       | None                                 |
+| disk_format      | qcow2                                |
+| id               | d73c678a-8ed2-4a7d-b56b-fa8f92f47bec |
+| is_public        | True                                 |
+| min_disk         | 0                                    |
+| min_ram          | 0                                    |
+| name             | Cirros 0.3.4                         |
+| owner            | None                                 |
+| protected        | False                                |
+| size             | 13287936                             |
+| status           | active                               |
+| updated_at       | 2016-07-15T04:39:58                  |
+| virtual_size     | None                                 |
++------------------+--------------------------------------+
+
+
+
+
+configure cinder
+
+create database
+mysql> CREATE DATABASE cinder CHARACTER SET utf8 COLLATE utf8_unicode_ci;
+Query OK, 1 row affected (0.00 sec)
+
+mysql> GRANT ALL ON cinder.* TO 'cinder_dbu'@'%' IDENTIFIED BY 'jennings';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> SHOW GRANTS FOR 'cinder_dbu'@'%';
++-----------------------------------------------------------------------------------------------------------+
+| Grants for cinder_dbu@%                                                                                   |
++-----------------------------------------------------------------------------------------------------------+
+| GRANT USAGE ON *.* TO 'cinder_dbu'@'%' IDENTIFIED BY PASSWORD '*52C5C125BDF246B5F9D8BF116F1D30417AF0F9D9' |
+| GRANT ALL PRIVILEGES ON `cinder`.* TO 'cinder_dbu'@'%'                                                    |
++-----------------------------------------------------------------------------------------------------------+
+2 rows in set (0.00 sec)
+
+Configuring a Cinder Keystone user
+root@controller:~# keystone user-create --name=cinder --pass="jennings" --email=jenningsloy318@gmail.com
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|  email   |     jenningsloy318@gmail.com     |
+| enabled  |               True               |
+|    id    | add48f0effbd44e4b384d5ff413f65e5 |
+|   name   |              cinder              |
+| username |              cinder              |
++----------+----------------------------------+
+
+root@controller:~# keystone user-role-add --user=cinder --role-id=admin --tenant=service
+
+
+root@controller:~# keystone user-role-list --user=cinder --tenant=service
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++----------------------------------+-------+----------------------------------+----------------------------------+
+|                id                |  name |             user_id              |            tenant_id             |
++----------------------------------+-------+----------------------------------+----------------------------------+
+| b4f0c248e11b4e7ca642f4f953399bb4 | admin | add48f0effbd44e4b384d5ff413f65e5 | 67d0e28f53c6470a8f8d8cc419b02d87 |
++----------------------------------+-------+----------------------------------+----------------------------------+
+
+
+keystone service-create --name=cinder --type=volume  --description="Block Storage"
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |          Block Storage           |
+|   enabled   |               True               |
+|      id     | b98e14388b6543aa9bba3893bad765c7 |
+|     name    |              cinder              |
+|     type    |              volume              |
++-------------+----------------------------------+
+Creating a Cinder endpoint
+
+root@controller:~# keystone endpoint-create --region RegionOne  --service=cinder  --publicurl=http://10.33.2.50:8776/v1/%\(tenant_id\)s --internalurl=http://192.168.0.50:8776/v1/%\(tenant_id\)s --adminurl=http://192.168.0.50:8776/v1/%\(tenant_id\)s
+
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++-------------+-------------------------------------------+
+|   Property  |                   Value                   |
++-------------+-------------------------------------------+
+|   adminurl  | http://192.168.0.50:8776/v1/%(tenant_id)s |
+|      id     |      0412522161ce40ea84f26a0081e57acb     |
+| internalurl | http://192.168.0.50:8776/v1/%(tenant_id)s |
+|  publicurl  |  http://10.33.2.50:8776/v1/%(tenant_id)s  |
+|    region   |                 RegionOne                 |
+|  service_id |      b98e14388b6543aa9bba3893bad765c7     |
++-------------+-------------------------------------------+
+install cinder-api cinder-scheduler
+root@controller:~# apt  install cinder-api cinder-scheduler  -y
+
+Modifying /etc/cinder/cinder.conf
+
+[DEFAULT]
+rpc_backend = rabbit
+rabbit_host = 192.168.0.50
+rabbit_password = jennings
+[database]
+connection = mysql://cinder_dbu:jennings@localhost/cinder
+[keystone_authtoken]
+auth_uri = http://192.168.0.50:35357
+admin_tenant_name = service
+admin_password = jennings
+auth_protocol = http
+admin_user = cinder
+
+Restarting Cinder
+root@controller:~# service cinder-scheduler restart
+cinder-scheduler stop/waiting
+cinder-scheduler start/running, process 10754
+root@controller:~# service cinder-api restart
+cinder-api stop/waiting
+cinder-api start/running, process 10775
+
+Initializing the data store
+root@controller:~# cinder-manage db sync
+2016-07-15 14:32:31.650 10810 INFO migrate.versioning.api [-] 0 -> 1... 
+2016-07-15 14:32:37.002 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:37.002 10810 INFO migrate.versioning.api [-] 1 -> 2... 
+2016-07-15 14:32:38.479 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:38.480 10810 INFO migrate.versioning.api [-] 2 -> 3... 
+2016-07-15 14:32:38.636 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:38.637 10810 INFO migrate.versioning.api [-] 3 -> 4... 
+2016-07-15 14:32:40.081 10810 INFO 004_volume_type_to_uuid [-] Created foreign key volume_type_extra_specs_ibfk_1
+2016-07-15 14:32:40.108 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:40.109 10810 INFO migrate.versioning.api [-] 4 -> 5... 
+2016-07-15 14:32:40.567 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:40.568 10810 INFO migrate.versioning.api [-] 5 -> 6... 
+2016-07-15 14:32:40.930 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:40.930 10810 INFO migrate.versioning.api [-] 6 -> 7... 
+2016-07-15 14:32:41.332 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:41.332 10810 INFO migrate.versioning.api [-] 7 -> 8... 
+2016-07-15 14:32:41.483 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:41.483 10810 INFO migrate.versioning.api [-] 8 -> 9... 
+2016-07-15 14:32:41.615 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:41.616 10810 INFO migrate.versioning.api [-] 9 -> 10... 
+2016-07-15 14:32:43.996 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:43.997 10810 INFO migrate.versioning.api [-] 10 -> 11... 
+2016-07-15 14:32:46.141 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:46.142 10810 INFO migrate.versioning.api [-] 11 -> 12... 
+2016-07-15 14:32:46.753 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:46.754 10810 INFO migrate.versioning.api [-] 12 -> 13... 
+2016-07-15 14:32:47.074 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:47.075 10810 INFO migrate.versioning.api [-] 13 -> 14... 
+2016-07-15 14:32:47.339 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:47.340 10810 INFO migrate.versioning.api [-] 14 -> 15... 
+2016-07-15 14:32:47.474 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:47.474 10810 INFO migrate.versioning.api [-] 15 -> 16... 
+2016-07-15 14:32:47.909 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:47.910 10810 INFO migrate.versioning.api [-] 16 -> 17... 
+2016-07-15 14:32:48.968 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:48.969 10810 INFO migrate.versioning.api [-] 17 -> 18... 
+2016-07-15 14:32:49.842 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:49.843 10810 INFO migrate.versioning.api [-] 18 -> 19... 
+2016-07-15 14:32:50.419 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:50.419 10810 INFO migrate.versioning.api [-] 19 -> 20... 
+2016-07-15 14:32:50.636 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:50.636 10810 INFO migrate.versioning.api [-] 20 -> 21... 
+2016-07-15 14:32:50.686 10810 INFO 021_add_default_quota_class [-] Added default quota class data into the DB.
+2016-07-15 14:32:50.770 10810 INFO migrate.versioning.api [-] done
+2016-07-15 14:32:50.771 10810 INFO migrate.versioning.api [-] 21 -> 22... 
+2016-07-15 14:32:51.125 10810 INFO migrate.versioning.api [-] done
+
+
+
+Configure netron
+
+create database
+
+mysql> CREATE DATABASE neutron CHARACTER SET utf8 COLLATE utf8_unicode_ci;
+Query OK, 1 row affected (0.00 sec)
+
+mysql> GRANT ALL ON neutron.* TO 'neutron_dbu'@'localhost' IDENTIFIED BY 'jennings';
+Query OK, 0 rows affected (0.04 sec)
+
+mysql> GRANT ALL ON neutron.* TO 'neutron_dbu'@'%' IDENTIFIED BY 'jennings';
+Query OK, 0 rows affected (0.00 sec)
+
+Creating a neutron user
+keystone user-create --name=neutron --pass="jennings" --email=jenningsloy318@gmail.com
+
+root@controller:~# keystone user-create --name=neutron --pass="jennings" --email=jenningsloy318@gmail.com 
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|  email   |     jenningsloy318@gmail.com     |
+| enabled  |               True               |
+|    id    | ab2ac2194fde489699d6b4f8d2dafd39 |
+|   name   |             neutron              |
+| username |             neutron              |
++----------+----------------------------------+
+Assigning the admin role to the neutron user in the service tenant
+root@controller:~# keystone user-role-add --user=neutron --role=admin --tenant=service
+
+Creating the Neutron service
+root@controller:~# keystone service-create --name=neutron --type=network --description="OpenStack Networking Service"
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |   OpenStack Networking Service   |
+|   enabled   |               True               |
+|      id     | 42383f8116314779a20b58b08f8f8953 |
+|     name    |             neutron              |
+|     type    |             network              |
++-------------+----------------------------------+
+
+Creating the Neutron endpoint
+root@controller:~# keystone endpoint-create  --region RegionOne  --service=neutron  --publicurl=http://10.33.2.50:9696  --internalurl=http://192.168.0.50:9696  --adminurl=http://192.168.0.50:9696
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminurl  |     http://192.168.0.50:9696     |
+|      id     | 4c9f26ec742749c0bbd3d051302ca71d |
+| internalurl |     http://192.168.0.50:9696     |
+|  publicurl  |      http://10.33.2.50:9696      |
+|    region   |            RegionOne             |
+|  service_id | 42383f8116314779a20b58b08f8f8953 |
++-------------+----------------------------------+
+
+Install Neutron package
+root@controller:~# apt install neutron-server -y 
+
+
+configure /etc/neutron/neutron.conf
+
+[DEFAULT]
+core_plugin = neutron.plugins.ml2.plugin.Ml2Plugin
+service_plugins = router,firewall,lbaas,vpnaas,metering
+allow_overlapping_ips = True
+nova_url = http://192.168.0.50:8774/v2
+
+# Name of nova region to use. Useful if keystone manages more than one region
+# nova_region_name =
+
+# Username for connection to nova in admin context
+nova_admin_username = admin
+
+# The uuid of the admin nova tenant
+nova_admin_tenant_id = 482865a449644957aa8c8a19a98c5130
+
+# Password for connection to nova in admin context.
+nova_admin_password = jennings
+
+# Authorization URL for connection to nova in admin context.
+nova_admin_auth_url = http://10.33.2.50:35357/v2.0
+
+rabbit_password = jennings
+
+[keystone_authtoken]
+auth_uri = http://10.33.2.50:5000
+auth_protocol = http
+admin_tenant_name = service
+admin_user = neutron
+admin_password = jennings
+signing_dir = $state_path/keystone-signing
+
+[database]
+# This line MUST be changed to actually run the plugin.
+# Example:
+# connection = mysql://root:pass@127.0.0.1:3306/neutron
+# Replace 127.0.0.1 above with the IP address of the database used by the
+# main neutron server. (Leave it as is if the database runs on this host.)
+#connection = sqlite:////var/lib/neutron/neutron.sqlite
+connection = mysql://neutron_dbu:jennings@localhost/neutron
+
+
+Modifying /etc/neutron/plugins/ml2/ml2_conf.ini
+[ml2]
+type_drivers = gre
+tenant_network_types = gre
+mechanism_drivers = openvswitch
+[ml2_type_gre]
+tunnel_id_ranges = 1:1000
+[securitygroup]
+firewall_driver = neutron.agent.linux.iptables_firewall.OVSHybridIptablesFirewallDriver
+enable_security_group = True
+
+
+Restarting Neutron
+root@controller:~# service neutron-server restart
+neutron-server stop/waiting
+neutron-server start/running, process
+
+
+
+configure nova servic
+
+create database
+mysql> CREATE DATABASE nova CHARACTER SET utf8 COLLATE utf8_unicode_ci;
+Query OK, 1 row affected (0.05 sec)
+
+mysql> GRANT ALL ON nova.* TO 'nova_dbu'@'localhost' IDENTIFIED BY 'jennings';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> GRANT ALL ON nova.* TO 'nova_dbu'@'%' IDENTIFIED BY 'jennings';
+Query OK, 0 rows affected (0.00 sec)
+
+Creating the nova user
+root@controller:~# keystone user-create --name=nova --pass="jennings" --email=jenningsloy318@gmail.com
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|  email   |     jenningsloy318@gmail.com     |
+| enabled  |               True               |
+|    id    | fc75020ebf9c4bf2b0feaa54be4cad02 |
+|   name   |               nova               |
+| username |               nova               |
++----------+----------------------------------+
+root@controller:~# keystone user-role-add --user=nova --role=admin --tenant=service
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
+root@controller:~# keystone user-role-list --user=nova --tenant=service
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++----------------------------------+-------+----------------------------------+----------------------------------+
+|                id                |  name |             user_id              |            tenant_id             |
++----------------------------------+-------+----------------------------------+----------------------------------+
+| b4f0c248e11b4e7ca642f4f953399bb4 | admin | fc75020ebf9c4bf2b0feaa54be4cad02 | 67d0e28f53c6470a8f8d8cc419b02d87 |
++----------------------------------+-------+----------------------------------+----------------------------------+
+
+
+root@controller:~# keystone service-create --name=nova --type=compute  --description="OpenStack Compute Service"
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |    OpenStack Compute Service     |
+|   enabled   |               True               |
+|      id     | 4f2c841d12264ad4927e0b96c9230f18 |
+|     name    |               nova               |
+|     type    |             compute              |
++-------------+----------------------------------+
+
+
+root@controller:~# keystone endpoint-create --region RegionOne  --service=nova --publicurl='http://10.33.2.50:8774/v2/$(tenant_id)s'  --internalurl='http://192.168.0.50:8774/v2/$(tenant_id)s' --adminurl='http://192.168.0.50:8774/v2/$(tenant_id)s'
+
++-------------+-------------------------------------------+
+|   Property  |                   Value                   |
++-------------+-------------------------------------------+
+|   adminurl  | http://192.168.0.50:8774/v2/$(tenant_id)s |
+|      id     |      bd8daea992a24b028f21ff1b6f0eb3f7     |
+| internalurl | http://192.168.0.50:8774/v2/$(tenant_id)s |
+|  publicurl  |  http://10.33.2.50:8774/v2/$(tenant_id)s  |
+|    region   |                 RegionOne                 |
+|  service_id |      4f2c841d12264ad4927e0b96c9230f18     |
++-------------+-------------------------------------------+
+
+
+Installing the Nova controller
+apt install nova-api nova-cert nova-conductor nova-consoleauth nova-novncproxy nova-scheduler python-novaclient
+
+
+
+configure /etc/nova/nova.conf
+
+[DEFAULT]
+rpc_backend = rabbit
+rabbit_host = 192.168.0.50
+rabbit_password = jennings
+my_ip = 192.168.0.50
+vncserver_listen = 0.0.0.0
+vncserver_proxyclient_address = 0.0.0.0
+auth_strategy=keystone
+service_neutron_metadata_proxy = true
+neutron_metadata_proxy_shared_secret = openstack1
+network_api_class = nova.network.neutronv2.api.API
+neutron_url = http://192.168.0.50:9696
+neutron_auth_strategy = keystone
+neutron_admin_tenant_name = service
+neutron_admin_username = neutron
+neutron_admin_password = jennings
+neutron_admin_auth_url = http://192.168.0.50:35357/v2.0
+linuxnet_interface_driver =nova.network.linux_net.LinuxOVSInterfaceDriver
+firewall_driver = nova.virt.firewall.NoopFirewallDriver
+security_group_api = neutron
+[database]
+connection = mysql://nova_dbu:jennings@localhost/nova
+[keystone_authtoken]
+auth_uri = http://192.168.0.50:35357
+admin_tenant_name = service
+admin_password = jennings
+auth_protocol = http
+admin_user = nova
+
+Restart nova services
+
+root@controller:~# cd /usr/bin/; for i in $( ls nova-* ); do sudo service $i restart; done
+
+
+
+install horizon
+apt install -y openstack-dashboard memcached python-memcache
+apt purge openstack-dashboard-ubuntu-theme
+
+
+
+Enable Debugging Dashboard
+**/usr/share/openstack-dashboard/openstack_dashboard/local/local_settings.py
+#DEBUG = False
+DEBUG = True
+
+restart apache2
+
+root@controller:~# service apache2 restart
+
+
+
+
+Neutron node configuration
+
+configure the parameters in /etc/sysctl.conf
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+
+
+apply the changes
+root@neutron:~# sysctl -p
+net.ipv4.conf.default.rp_filter = 0
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.ip_forward = 1
+
+
+
+install openvswitch 
+root@neutron:~# apt install openvswitch-switch  -y
+
+configure ovs bridgae br-ex for external, br-int for internal GRE turnel 
+root@neutron:~#  ovs-vsctl add-br br-int
+root@neutron:~# ovs-vsctl add-br br-ex
+root@neutron:~# ovs-vsctl show 
+ed46637c-c2ae-4398-a402-b8edef3e073d
+    Bridge br-ex
+        Port br-ex
+            Interface br-ex
+                type: internal
+    Bridge br-int
+        Port br-int
+            Interface br-int
+                type: internal
+    ovs_version: "2.0.2"
+Configure the external br-ex
+
+root@neutron:~# ovs-vsctl add-port br-ex eth2 
+root@neutron:~# ovs-vsctl br-set-external-id br-ex bridge-id br-ex
+root@neutron:~# sudo ovs-vsctl show
+ed46637c-c2ae-4398-a402-b8edef3e073d
+    Bridge br-ex
+        Port br-ex
+            Interface br-ex
+                type: internal
+        Port "eth2"
+            Interface "eth2"
+    Bridge br-int
+        Port br-int
+            Interface br-int
+                type: internal
+    ovs_version: "2.0.2"
+
+Configure neutron and its plugins
+
+Modify /etc/neutron/neutron.conf
+[DEFAULT]
+
+verbose = True
+
+auth_strategy = keystone
+
+rpc_backend = neutron.openstack.common.rpc.impl_kombu
+
+rabbit_host = 192.168.0.50
+
+rabbit_password = openstack1
+
+core_plugin = neutron.plugins.ml2.plugin.Ml2Plugin
+
+allow_overlapping_ips = True
+
+service_plugins = router,firewall,lbaas,vpnaas,metering
+
+nova_url = http://127.0.0.1:8774/v2
+
+nova_admin_username = admin
+
+nova_admin_password = jennings
+
+nova_admin_tenant_id = b3c5ebecb36d4bb2916fecd8aed3aa1a
+
+nova_admin_auth_url = http://10.33.2.50:35357/v2.0
+
+[keystone_authtoken]
+
+auth_url = http://10.33.2.50:35357/v2.0
+
+admin_tenant_name = service
+
+admin_password = jennings
+
+auth_protocol = http
+
+admin_user = neutron
+
+[database]
+
+connection = mysql://neutron_dbu:openstack1@192.168.0.50/neutron
+
+Modify ML2 plugin /etc/neutron/plugins/ml2/ml2_conf.ini
+[ml2]
+
+type_drivers = gre
+
+tenant_network_types = gre
+
+mechanism_drivers = openvswitch
+
+[ml2_type_gre]
+
+tunnel_id_ranges = 1:1000
+
+[ovs]
+
+local_ip = 192.168.0.51
+
+tunnel_type = gre
+
+enable_tunneling = True
+
+[securitygroup]
+
+firewall_driver =
+
+neutron.agent.linux.iptables_firewall.OVSHybridIptablesFirewallDriver
+
+enable_security_group = True
+
+Modify /etc/neutron/l3_agent.ini
+[DEFAULT]
+
+interface_driver = neutron.agent.linux.interface.OVSInterfaceDriver
+
+use_namespaces = True
+
+verbose = True
+Modify /etc/neutron/dhcp_agent.ini
+[DEFAULT]
+
+...
+
+interface_driver = neutron.agent.linux.interface.OVSInterfaceDriver
+
+dhcp_driver = neutron.agent.linux.dhcp.Dnsmasq
+
+use_namespaces = True
+
+root@neutron:/etc/init.d# keystone tenant-list
++----------------------------------+---------+---------+
+|                id                |   name  | enabled |
++----------------------------------+---------+---------+
+| 482865a449644957aa8c8a19a98c5130 |  admin  |   True  |
+| 67d0e28f53c6470a8f8d8cc419b02d87 | service |   True  |
++----------------------------------+---------+---------+
+root@neutron:/etc/init.d# neutron net-create --tenant-id=482865a449644957aa8c8a19a98c5130 ADMIN_INTERNAL_NETWORK
+Created a new network:
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | True                                 |
+| id                        | d2f48274-6d63-4370-b13d-50372d1f35a0 |
+| name                      | ADMIN_INTERNAL_NETWORK               |
+| provider:network_type     | gre                                  |
+| provider:physical_network |                                      |
+| provider:segmentation_id  | 1                                    |
+| shared                    | False                                |
+| status                    | ACTIVE                               |
+| subnets                   |                                      |
+| tenant_id                 | 482865a449644957aa8c8a19a98c5130     |
++---------------------------+--------------------------------------+
+root@neutron:/etc/init.d# neutron subnet-create --tenant-id=482865a449644957aa8c8a19a98c5130 --name ADMIN_INTERNAL_SUBNET ADMIN_INTERNAL_NETWORK 172.16.0.0/24
+Created a new subnet:
++------------------+------------------------------------------------+
+| Field            | Value                                          |
++------------------+------------------------------------------------+
+| allocation_pools | {"start": "172.16.0.2", "end": "172.16.0.254"} |
+| cidr             | 172.16.0.0/24                                  |
+| dns_nameservers  |                                                |
+| enable_dhcp      | True                                           |
+| gateway_ip       | 172.16.0.1                                     |
+| host_routes      |                                                |
+| id               | bf3e0b0d-e30d-462c-bbac-667a5a49a7c2           |
+| ip_version       | 4                                              |
+| name             | ADMIN_INTERNAL_SUBNET                          |
+| network_id       | d2f48274-6d63-4370-b13d-50372d1f35a0           |
+| tenant_id        | 482865a449644957aa8c8a19a98c5130               |
++------------------+------------------------------------------------+
+
+root@neutron:~# neutron router-create --tenant-id=482865a449644957aa8c8a19a98c5130 ADMIN_ROUTER
+Created a new router:
++-----------------------+--------------------------------------+
+| Field                 | Value                                |
++-----------------------+--------------------------------------+
+| admin_state_up        | True                                 |
+| external_gateway_info |                                      |
+| id                    | 94540ed0-cdc0-4b45-b495-e526a04ef812 |
+| name                  | ADMIN_ROUTER                         |
+| status                | ACTIVE                               |
+| tenant_id             | 482865a449644957aa8c8a19a98c5130     |
++-----------------------+--------------------------------------+
+
+root@neutron:~# neutron router-interface-add 94540ed0-cdc0-4b45-b495-e526a04ef812 bf3e0b0d-e30d-462c-bbac-667a5a49a7c2
+Added interface 1531865b-1957-462e-b41d-df4c6d5ca097 to router 94540ed0-cdc0-4b45-b495-e526a04ef812.
+root@neutron:~# neutron net-create --tenant-id=482865a449644957aa8c8a19a98c5130  --router:external=True ADMIN_NETWORK_PUBLIC
+Created a new network:
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | True                                 |
+| id                        | e3d61776-a688-4ce5-88a2-893cbd21789b |
+| name                      | ADMIN_NETWORK_PUBLIC                 |
+| provider:network_type     | gre                                  |
+| provider:physical_network |                                      |
+| provider:segmentation_id  | 2                                    |
+| router:external           | True                                 |
+| shared                    | False                                |
+| status                    | ACTIVE                               |
+| subnets                   |                                      |
+| tenant_id                 | 482865a449644957aa8c8a19a98c5130     |
++---------------------------+--------------------------------------+
+
+root@neutron:~# neutron subnet-create --gateway 10.33.2.1 --allocation-pool start=10.33.2.200,end=10.33.2.250 --name ADMIN_SUBNET_PUBLIC ADMIN_NETWORK_PUBLIC 10.33.2.0/24 --enable_dhcp=False
+Created a new subnet:
++------------------+------------------------------------------------+
+| Field            | Value                                          |
++------------------+------------------------------------------------+
+| allocation_pools | {"start": "10.33.2.200", "end": "10.33.2.250"} |
+| cidr             | 10.33.2.0/24                                   |
+| dns_nameservers  |                                                |
+| enable_dhcp      | False                                          |
+| gateway_ip       | 10.33.2.1                                      |
+| host_routes      |                                                |
+| id               | 54f1fc2f-4788-41d6-92c0-7c4bde3a37c0           |
+| ip_version       | 4                                              |
+| name             | ADMIN_SUBNET_PUBLIC                            |
+| network_id       | 4dd66d16-ce07-4b4a-a16c-ac903fc88eee           |
+| tenant_id        | 482865a449644957aa8c8a19a98c5130               |
++------------------+------------------------------------------------+
+root@neutron:~# neutron router-gateway-set 94540ed0-cdc0-4b45-b495-e526a04ef812  e3d61776-a688-4ce5-88a2-893cbd21789b
+Set gateway for router 94540ed0-cdc0-4b45-b495-e526a04ef812
+root@neutron:~# neutron router-list
++--------------------------------------+--------------+-----------------------------------------------------------------------------+
+| id                                   | name         | external_gateway_info                                                       |
++--------------------------------------+--------------+-----------------------------------------------------------------------------+
+| 94540ed0-cdc0-4b45-b495-e526a04ef812 | ADMIN_ROUTER | {"network_id": "e3d61776-a688-4ce5-88a2-893cbd21789b", "enable_snat": true} |
++--------------------------------------+--------------+-----------------------------------------------------------------------------+
+
+
+
+
+Configure Cinder
+install lvm2/create lvm
+root@cinder:~# apt install lvm2 -y
+root@cinder:~# pvcreate /dev/vdb
+root@cinder:~#  vgcreate cinder-volumes /dev/vdb
+
+configure /etc/cinder/cinder.conf
+[DEFAULT]
+
+...
+
+iscsi_helper = tgtadm
+
+volume_group = cinder-volumes
+
+rpc_backend = cinder.openstack.common.rpc.impl_kombu
+
+rabbit_host = 192.168.0.50
+
+rabbit_password = jennings
+
+glance_host = 192.168.0.50
+
+[database]
+
+connection = mysql://cinder_dbu:jennings@192.168.0.50/cinder
+
+[keystone_authtoken]
+
+auth_uri = http://10.33.2.50:35357/v2.0
+
+admin_tenant_name = service
+
+admin_password = jennings
+
+auth_protocol = http
+
+admin_user = cinder
+
+root@cinder:~# cinder create --display-name "ADMIN_VOLUME1" --display-description "First volume" 1
++---------------------+--------------------------------------+
+|       Property      |                Value                 |
++---------------------+--------------------------------------+
+|     attachments     |                  []                  |
+|  availability_zone  |                 nova                 |
+|       bootable      |                false                 |
+|      created_at     |      2016-07-17T10:52:11.531134      |
+| display_description |             First volume             |
+|     display_name    |            ADMIN_VOLUME1             |
+|      encrypted      |                False                 |
+|          id         | b0f789ff-7b0c-416d-885f-3db49c0a1077 |
+|       metadata      |                  {}                  |
+|         size        |                  1                   |
+|     snapshot_id     |                 None                 |
+|     source_volid    |                 None                 |
+|        status       |               creating               |
+|     volume_type     |                 None                 |
++---------------------+--------------------------------------+
+
+
