@@ -1,0 +1,141 @@
+1 install kvm and related packages
+
+yum install -y  kvm  libvirt libvirt-python python-virtinst python-twisted-core python-zope-interface PyQt4 groff graphviz checkpolicy selinux-policy-devel libcap-ng-devel  virt-install virt-viewer seabios-bin openssl-devel rpm-build gcc libvirt-client
+
+2. download openvswitch 
+mkdir rpmbuild/SOURCES
+wget http://openvswitch.org/releases/openvswitch-2.5.1.tar.gz -O /root/openvswitch-2.5.1.tar.gz -O rpmbuild/SOURCES/openvswitch-2.5.1.tar.gz
+
+3. uncompress
+cd rpmbuild/SOURCES ; tar xvf openvswitch-2.5.1.tar.gz
+
+
+6 compile 
+
+rpmbuild -bb openvswitch-2.5.1/rhel/openvswitch.spec
+
+
+
+sed -i "s/Requires: logrotate, python >= 2.7/Requires: logrotate/" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/$RPM_BUILD_ROOT\/usr\/bin\/ovs-test/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/$RPM_BUILD_ROOT\/usr\/bin\/ovs-l3ping/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/bin\/ovs-parse-backtrace/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/bin\/ovs-pcap/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/bin\/ovs-tcpundump/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/bin\/ovs-vlan-test/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/share\/man\/man8\/ovs-bugtool.8.gz/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/share\/openvswitch\/bugtool-plugins/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/share\/openvswitch\/scripts\/ovs-bugtool-*/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/share\/openvswitch\/python/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/share\/openvswitch\/scripts\/ovs-bugtool-*/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/bin\/ovs-dpctl-top/d" openvswitch-2.5.1/rhel/openvswitch.spec
+sed -i "/\/usr\/sbin\/ovs-bugtool/d" openvswitch-2.5.1/rhel/openvswitch.spec
+echo "/usr/bin/ovs-testcontroller" >> openvswitch-2.5.1/rhel/openvswitch.spec 
+
+
+7 install openvswitch 
+
+rpm -ivh openvswitch-2.5.1-1.el7.x86_64.rpm 
+
+
+8(optional) modify /etc/sysconfig/openvswitch, add BRCOMPAT=yes at the end of the file
+
+9 make openvswitch/libvirtd start at boot, and then reboot the server
+systemctl enable openvswitch
+systemctl start libvirtd
+10  add a bridge to ovs 
+ovs-vsctl add-br br0
+
+11 attach the Ethernet device to this bridge
+ovs-vsctl add-port br0 eno16780032
+
+12. configure the ovs bridge with static ip address 
+#cat /etc/sysconfig/network-scripts/ifcfg-br0 
+DEVICE=br0
+ONBOOT=yes
+DEVICETYPE=ovs
+TYPE=OVSBridge
+HOTPLUG=no
+USERCTL=no
+IPADDR=10.88.131.200
+NETMASK=255.255.254.0
+GATEWAY=10.88.130.1
+
+13. configure the ethernet device
+#cat /etc/sysconfig/network-scripts/ifcfg-eno16780032 
+DEVICE="eno16780032"
+NAME="eno16780032"
+BOOTPROTO="none"
+ONBOOT="yes"
+DEVICETYPE=ovs
+TYPE=OVSPort
+OVS_BRIDGE=br0
+
+
+
+if  on debian based OS, modify /etc/network/interfaces
+# cat /etc/network/interfaces
+auto lo
+ iface lo inet loopback
+auto enp2s0
+ iface enp2s0 inet manual
+auto br0
+ iface br0 inet dhcp
+ bridge_ports enp2s0
+
+or if using static IP address
+# cat /etc/network/interfaces
+auto lo
+ iface lo inet loopback
+auto enp2s0
+ iface enp2s0 inet manual
+auto br0
+ iface br0 inet dhcp
+ bridge_ports enp2s0
+ address 192.168.86.121
+ netmask 255.255.255.0
+ gateway 192.168.86.1
+
+14. restart network service
+
+
+15 define ovs network for libvirtd
+# cat ovs.xml 
+<network>
+  <name>ovs</name>
+  <forward mode='bridge'/>
+  <bridge name='br0'/>
+  <virtualport type='openvswitch'/>
+</network>
+
+
+<network connections='1'>
+  <name>default</name>
+  <uuid>a6b65c03-862c-47d2-9b71-589b67499a21</uuid>
+  <forward mode='bridge'/>
+  <bridge name='br0'/>
+  <virtualport type='openvswitch'/>
+</network>
+
+
+16. create the ovs network 
+ # virsh net-define ovs.xml 
+ Network ovs defined from ovs.xml
+17 activate the ovs network
+ # virsh net-start ovs
+ Network ovs started
+
+18. create disk file 
+qemu-img create -f qcow2  OS.img 30G
+qemu-img create -f qcow2  data.img 5T
+18. create a new vm 
+
+virt-install --name=VectorDB1 --disk path=/data/kvm/VectorDB1/OS.img,size=30,format=qcow2 --disk path=/data/kvm/VectorDB1/data.img,size=51200,format=qcow2 --vcpus 10  --ram=65536 --os-type=linux --os-variant=rhel6 --network network=default --graphics none  --location=./rhel-server-6.8-x86_64-dvd.iso --console pty,target_type=serial  --extra-args 'console=ttyS0,115200n8 serial'
+
+
+
+
+
+
+
+
